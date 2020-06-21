@@ -1,0 +1,392 @@
+---
+title: "IBM HR Analytics Employee Attrition & Performance"
+author: "Jesus Gastañaduy"
+date: "June 21, 2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+```
+
+```{r libraries, include=FALSE}
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(Rborist)) install.packages("Rborist", repos = "http://cran.us.r-project.org")
+if(!require(ggrepel)) install.packages("ggrepel", repos = "http://cran.us.r-project.org")
+if(!require(broom)) install.packages("broom", repos = "http://cran.us.r-project.org")
+```
+
+```{r data loading, include=FALSE}
+
+# IBM HR Analytics Employee Attrition & Performance Dataset
+tb<- read_csv("https://github.com/j-gastanaduy/Data_science_capstone_edx/raw/master/HR-Employee-Attrition.csv",
+              col_types = cols(Attrition = col_factor(levels = c("No", "Yes")),
+                               BusinessTravel = col_factor(levels = c("Non-Travel", "Travel_Rarely", "Travel_Frequently")),
+                               Department = col_factor(),
+                               EducationField= col_factor(),
+                               Gender= col_factor(levels = c("Female", "Male")),
+                               JobRole= col_factor(),
+                               MaritalStatus= col_factor(),
+                               Over18= col_factor(),
+                               OverTime= col_factor(levels = c("No", "Yes"))))
+tb<- tb%>%
+  mutate(Attrition = fct_recode(Attrition, "0"="No", "1"="Yes"))
+
+```
+
+
+# Introduction
+
+It is well known that human capital is one of the main assets of any company, if not the most important one. For this reason, it is wise to lower the attrition rate as much as possible. To do this, we must first know who are the employees that are quitting and what are the variables which might be explaining this behavior.
+
+With this purpose in mind, we wanted to create an algorithm that could predict employee attrition. On this occasion, we worked with a fictional open dataset created by IBM data scientists. We first started by exploring the dataset.
+
+```{r dataset, include=FALSE}
+tb
+```
+
+The whole database contains 35 variables with 1470 observations. Some of the variables included are "Attrition", "Age", "Business Travel", "Environment satisfaction", "Monthly income", "Performance rating", "Total working years" among the most salient. It is worth mentioning that all variables were transformed into factors or numerical vectors, as corresponded, for analysis purposes.
+
+As said, the goal of our machine learning model was to predict employee attrition. To do that we tried different algorithms and tested which performed better according to the most relevant evaluation metrics given the data. 
+
+
+# Methods
+
+We first wanted to know if our data was biased in some way. After visualizing the proportion of employees that either continued or left the company, it could be easily seen that our dataset was biased; with nearly 84% of employee continuity and over 16% of employee attrition. 
+
+```{r }
+prop.table(table(tb$Attrition))
+```
+
+This unbalance was taken into account when evaluating our machine learning models.
+
+To start with the creation of our algorithms, we first partitioned the whole dataset into two: one train set (80% of the data) and one test set (20% of the data). We carried all of our analyses on the train set; the test set was only used for validation purposes.
+
+```{r data partition, warning=FALSE}
+##create train and validation sets
+set.seed(1)
+index<- createDataPartition(y= tb$Attrition, times = 1, p = 0.8, list = FALSE)
+train_set<- tb[index, ]
+test_set<- tb[-index, ]
+```
+
+Before the creation of any machine learning model, we did some pre-processing of our data on the train set. As there were many predictors, we looked for the ones which had near zero variance to remove them. We ended up removing the variables "Employee Count", "Over 18" and "Standard Hours". We updated our train set to only include the variables which had statistical variation.
+
+```{r data pre-processing}
+##preprocessing train_set
+nearZeroVar(tb)
+
+train_set<- train_set%>%
+  select(-c("EmployeeCount", "Over18", "StandardHours"))
+```
+
+After doing the pre-processing of our data, we started by fitting some models. 
+
+## k- nearest neighbors
+```{r knn}
+##knn
+set.seed(5)
+train_knn<- train(Attrition ~ ., data = train_set,
+                  method = "knn",
+                  tuneGrid = data.frame(k = seq(5, 100, 5)),
+                  trControl= trainControl(method = "cv", number = 10, p = .9))
+```
+
+We started with k-nearest neighbors. We chose attrition as our dependent variable. To optimize on our k parameter on the train set, we conducted ten-fold cross validation using 90% of the data. For replication purposes, we set a seed. The optimal k of this first model was `r train_knn$bestTune$k`. We did not include a larger number of k, as the plot below shows how the accuracy of the model depending on k remains constant as k is above 20 neighbors.
+
+```{r knn plot}
+plot(train_knn)
+```
+
+By looking at the confusion matrix of this model we saw that any value was predicted as 0, which implied employee continuity. 
+
+```{r knn confusion matrix}
+confusionMatrix(predict(train_knn, test_set), test_set$Attrition, positive = "1")
+```
+
+This may make sense, from a machine learning perspective, as the nearest neighbors of any point were employees who continued on their job (because of the high prevalence of this condition). However, a machine learning model that only predicts continuity on the job does not have any practical usage.
+
+
+## Classification tree
+```{r CART}
+train_rpart<- train(Attrition ~ ., data= train_set,
+                    method= "rpart",
+                    tuneGrid = data.frame(cp = seq(0, 0.1, length.out = 25)))
+
+```
+
+We then tried to fit a classification tree to see if this model could make better predictions than the first one. In this case we optimized on the complexity parameter by creating a sequence of 25 numbers from 0 to 0.10, so we were able to identify the minimum improvement in accuracy for another partition to be made. 
+
+By plotting the complexity parameter values against their corresponding accuracy, we found that the parameter that optimized the classification tree was `r train_rpart$bestTune$cp`. Higher values of the complexity parameter only diminished accuracy, so no more values were included in the optimization process.
+
+```{r optimizing on cp}
+ggplot(train_rpart, highlight = TRUE)
+```
+
+By looking at the confusion matrix however, we could observe that this model performed no much better than knn in accuracy terms.
+
+```{r confusion matrix CART}
+confusionMatrix(predict(train_rpart, test_set), test_set$Attrition, positive = "1")
+```
+
+
+## Random forest
+We then tried using a random forest approach to see whether it could perform better than its basic form, the classification tree.
+
+```{r}
+set.seed(51)
+train_rf<- train(Attrition ~., data = train_set,
+                 method= "Rborist",
+                 nTree= 50,
+                 trControl= trainControl(method = "cv", number = 5, p = .9),
+                 tuneGrid= data.frame(predFixed = seq(2, 20, 2),
+                                      minNode = c(12)))
+```
+
+To reduce computing time, we first created a forest of 50 trees using five-fold cross validation with 90% of the training data, so the random selection of features as well as the node size were optimized.
+
+By looking at the confusion matrix of this model, we saw that it performed no better than the previous algorithms we tried.
+
+```{r confusion rforest}
+confusionMatrix(predict(train_rf, test_set), test_set$Attrition, positive = "1")
+```
+
+At this point, it was evident that the models were predicting to many negatives while zero positives. This was an important insight gained. In our view, for a machine learning algorithm to be of any use to an HR department, it should detect as many employees who will quit or likely quit as possible. This was not happening with the algorithms we were creating. This made us realize that, the models we tried to fit were not the best, we were also not evaluating on the best performance metrics given the data.
+
+# Logistic regression
+```{r logistic 1}
+train_glm<- glm(Attrition ~., data= train_set, family = "binomial")
+p_hat_glm<- predict(train_glm, test_set, type = "response")
+y_hat_glm<- ifelse(p_hat_glm > 0.5, "1", "0")%>%
+  factor(levels = c("0", "1"))
+```
+
+As the task of our algorithm was to classify, we tried a very basic model in machine learning to see how it performed. We tried logistic regression and, to our surprise, its accuracy was better than any of the other models we used.
+
+By looking at its confusion matrix, we saw that not only accuracy improved, but also sensitivity, the positive predictive value and the balanced accuracy.
+
+```{r confusion logistic}
+confusionMatrix(y_hat_glm, test_set$Attrition, positive = "1")
+```
+
+Given this model was better than the previous ones, we wanted to know whether we could optimize this model even more. That is why we looked at the significance of every predictor to see which ones to keep and which ones to drop.
+
+```{r predictors logistic}
+summary(train_glm)
+```
+
+
+By looking at all the predictors we were able to see which ones we could drop to improve the performance of our model. We ended up removing the predictors "Department", "Education", "Employee number", "Job level", "Hourly rate", "Monthly income", "Monthly rate", "Percent salary hike", "Performance rating" and "Stock option level" because none of them were statistically significant in predicting attrition. 
+
+```{r}
+
+train_glm2<- glm(Attrition ~ .-Department-Education-EmployeeNumber-JobLevel- HourlyRate
+                 -MonthlyIncome-MonthlyRate - PercentSalaryHike- PerformanceRating- StockOptionLevel, 
+                 data= train_set, family = "binomial")
+p_hat_glm2<- predict(train_glm2, test_set, type = "response")
+y_hat_glm2<- ifelse(p_hat_glm2 > 0.5, "1", "0")%>%
+  factor(levels = c("0", "1"))
+```
+
+After doing this, we realized we did not improve our accuracy; as it can be see in the confusion matrix.
+
+```{r}
+confusionMatrix(y_hat_glm2, test_set$Attrition, positive = "1")
+```
+
+However, we did improve the fit of our model. We were able to look at this by comparing the AIC of the first logistic model and the AIC of this second one. As it can be seen in the tables below, the AIC of the second logistic model was lower than of the first one, which implied a better model.
+
+```{r}
+glance(train_glm)
+
+glance(train_glm2)
+```
+
+We did not stop here. As we realized, the goal of our machine learning model was to predict as many positives, while keeping a decent amount of true positives and negatives. Because of this reason, we wanted to know if lowering the probability below 50% of predicting either a positive or a negative, could improve the sensitivity of our model, as well as its precision. 
+
+```{r pr_plot logistic}
+
+##Precision-Recall(logistic regression)
+probs <- seq(0.001, 1, length.out = 10)
+
+method_logistic<- sapply(probs, function(p){
+  y_hat<- ifelse(p_hat_glm2 > p, "1", "0")%>%
+    factor(levels = c("0", "1"))
+  list(method = "Logistic Regression",
+       cutoff= p,
+       FPR = 1-specificity(y_hat, test_set$Attrition),
+       recall_TPR = sensitivity(y_hat, test_set$Attrition),
+       precision = precision(y_hat, test_set$Attrition))})
+
+tb_logistic<- data.frame(t(method_logistic))
+
+pr_plot_logistic<-
+  tb_logistic%>%
+  unnest()%>%
+  ggplot(aes(recall_TPR, precision, label = cutoff)) +
+  geom_line() +
+  geom_point()+
+  geom_text_repel(nudge_x = 0.001, nudge_y = -0.001) 
+```
+
+Given our data was biased, we knew that a precision-recall plot could help us visualize different probability values to optimize on our chosen parameters. The plot below shows different probability values with its respective recall and precision.
+
+```{r}
+pr_plot_logistic
+```
+
+By looking at this plot, we saw that a probability of 0.334 gave us a good balance between good precision and a good enough true positive rate. We went a step further and and wanted to know whether a value below 0.35 was better at giving us a better balance between precision and recall. We will discuss our results of this model later on.
+
+```{r}
+
+###optimizing probability cutoff in logistic regression
+probs <- seq(0.001, 0.35, length.out = 12)
+
+method_logistic<- map_df(probs, function(p){
+  y_hat<- ifelse(p_hat_glm2 > p, "1", "0")%>%
+    factor(levels = c("0", "1"))
+  list(method = "Logistic Regression",
+       cutoff= round(p,3),
+       FPR = 1-specificity(y_hat, test_set$Attrition),
+       recall_TPR = sensitivity(y_hat, test_set$Attrition),
+       precision = precision(y_hat, test_set$Attrition))})
+
+tb_logistic<- data.frame(t(method_logistic))
+
+pr_plot_logistic<-
+  tb_logistic%>%
+  unnest()%>%
+  ggplot(aes(recall_TPR, precision, label = cutoff)) +
+  geom_line() +
+  geom_point()+
+  geom_text_repel(nudge_x = 0.001, nudge_y = -0.001)
+```
+
+
+## Linear Discriminant Analysis
+
+As our logistic regression model performed well, we wanted to know whether a Linear Discriminant Analysis approach could be better or could ensemble well with our logistic regression model.
+
+```{r lda}
+##LDA
+train_lda<- train(Attrition ~ ., data = train_set, 
+                  method = "lda")
+p_hat_lda<- predict(train_lda, test_set, type = "prob")
+y_hat_lda<- predict(train_lda, test_set)
+```
+
+By looking at its confusion matrix, we were able to see that this model had the best accuracy thus far. However, it did not improve by much the true positive cases detected in comparison with our logistic regression approach.
+
+```{r confusion lda}
+confusionMatrix(y_hat_lda, test_set$Attrition, positive = "1")
+```
+
+To optimize on this, we did the same procedure as with logistic regression to see whether relaxing  our probability value could give us better sensitivity, precision and recall.
+
+```{r}
+
+##Precision-Recall (lda)
+probs <- seq(0.001, 0.35, length.out = 12)
+
+method_lda<- map_df(probs, function(p){
+  y_hat<- ifelse(p_hat_lda[,2] > p, "1", "0")%>%
+    factor(levels = c("0", "1"))
+  list(method = "LDA",
+       cutoff= round(p,3),
+       FPR = 1-specificity(y_hat, test_set$Attrition),
+       recall_TPR = sensitivity(y_hat, test_set$Attrition),
+       precision = precision(y_hat, test_set$Attrition))})
+
+```
+
+
+## Ensemble (logistic regression + lda)
+```{r}
+
+##ensemble lda + logistic
+p_ensemble<- (p_hat_glm2+p_hat_lda[,2])/2
+
+probs <- seq(0.001, 0.35, length.out = 12)
+
+method_ensemble<- map_df(probs, function(p){
+  y_hat<- ifelse(p_ensemble> p, "1", "0")%>%
+    factor(levels = c("0", "1"))
+  list(method = "Ensemble",
+       cutoff= round(p,3),
+       FPR = 1-specificity(y_hat, test_set$Attrition),
+       recall_TPR = sensitivity(y_hat, test_set$Attrition),
+       precision = precision(y_hat, test_set$Attrition))})
+```
+
+Finally, we created an ensemble model, which averaged the probabilities of our logistic regression and of our linear discriminant analysis. For optimization purposes, we also relaxed our probability cutoff of 50% to see whether a lower value performed better according to our chosen evaluation metrics.
+
+
+# Results
+```{r}
+pr_plots<-
+bind_rows(method_logistic, method_lda, method_ensemble)%>%
+  ggplot(aes(recall_TPR, precision, color= method))+
+  geom_line() +
+  geom_point()
+```
+
+After trying different machine learning algorithms to predict attrition, we ended up with three main ones which performed best according to our chose evaluation metrics : logistic regression, linear discriminant analysis and the ensemble model (logistic regression + lda).
+
+The plot below shows the precision recall curves of these three models according to different probability values; all of which were below 35%. It is worth mentioning again that, in our view, choosing a probability value below 50% was correct, given making some false positive errors was preferable to making many false negative errors.
+
+```{r pr plots all models}
+pr_plots
+```
+
+By looking at the plot, we were able to see that any of the three models could have best performance depending on the probability chosen value. We looked at different probability values that had the best relative performance according to the method used. 
+```{r probability values}
+method_ensemble[4,]
+method_ensemble[5,]
+method_logistic[6,]
+method_lda[3,]
+method_lda[7,]
+```
+
+
+After examining these values, we considered that a probability value equal or below 10% would have great sensitivity, but would predict too many false positives, which is also not optimal. That is why, one of our criterion for selecting a probability value cutoff was that it should be above 10%.
+
+```{r}
+
+##evaluation metrics of final models
+y_hat_glm2.3<- ifelse(p_hat_glm2 > 0.16, "1", "0")%>%
+  factor(levels = c("0", "1"))
+metrics_logistic<- confusionMatrix(y_hat_glm2.3, test_set$Attrition, positive = "1") 
+
+y_hat_lda2<- ifelse(p_hat_lda[2] > 0.191, "1", "0")%>%
+  factor(levels = c("0", "1"))
+metrics_lda<- confusionMatrix(y_hat_lda2, test_set$Attrition, positive = "1")
+
+y_hat_ensemble<- ifelse(p_ensemble > 0.128, "1", "0")%>%
+  factor(levels = c("0", "1"))
+metrics_ensemble<- confusionMatrix(y_hat_ensemble, test_set$Attrition, positive = "1")
+
+```
+
+In the end, we chose different probability values for each of the methods considered. Thus, we chose the values which allowed one method to outperform the other two methods regarding precision and recall. So, we ended up choosing a probability cutoff of 16% for logistic regression; 19.1%, for linear discriminant analysis; and 12.8%, for the ensemble model (logistic regression + lda).
+
+By looking at the confusion matrix of these methods, we were able to see that the method which had the best balanced accuracy was the logistic regression alone; it was .77. The lda approach, however, had the best positive predictive value metric above all; but it was the lowest in sensitivity. 
+
+```{r}
+metrics_logistic
+metrics_lda
+metrics_ensemble
+```
+
+At this point it is important to take into account the accuracy of the Linear Discriminant Analysis which took 50% as the probability value cutoff. Although it had a much higher accuracy than our logistic regression model (.87 in comparison with .77), it had a much lower sensitivity, as well as balanced accuracy (.40 and .68 respectively).
+
+As it was mentioned before, we did not mind much making false positive mistakes, while detecting a fair amount of true positives and negatives. For these reasons we believe our best performing model to predict attrition was the logistic regression alone. It took 16% as the probability value cutoff, and, although had a positive predictive value of .39; had a balanced accuracy of .77 and a sensitivity of .76.
+
+
+# Conclusion
+
+The goal of this project was to predict employee attrition. We fitted several models and ended up choosing a logistic regression approach because we believed it would be the algorithm which would help best an HR department: it had one of the highest sensitivity, while keeping specificity high and maintaining the overall best balanced accuracy. Future work may try to fit unsupervised machine learning models to see whether they can outperform our logistic regression approach. 
+
+
+
+
